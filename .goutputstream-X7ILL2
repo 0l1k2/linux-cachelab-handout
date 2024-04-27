@@ -1,0 +1,184 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <getopt.h>
+#include <unistd.h>
+#include"cachelab.h"
+typedef struct {
+    int s;		// Number of set index bits
+    int E;		// Associativity (number of lines per set)
+    int b;		// Number of block bits
+    char* tracefile;	// Name of trace file
+} CacheSimulator;
+
+typedef struct {
+    int valid;		// Whether the line is valid or not
+    int tag;		// Tag bits
+    int lastUsed;	// Last used timestamp
+} CacheLine;
+
+typedef struct {
+    int hits;		// Number of cache hits
+    int misses;		// Number of cache misses
+    int evictions;	// Number of cache evictions
+    CacheLine** sets;	// Array of cache sets
+} Cache;
+
+void printUsage() {
+    printf("Usage: ./csim -s <s> -E <E> -b <b> -t <tracefile>\n");
+    printf("Options:\n");
+    printf("  -s <s>: Number of set index bits (S = 2^s is the number of sets)\n");
+    printf("  -E <E>: Associativity (number of lines per set)\n");
+    printf("  -b <b>: Number of block bits (B = 2^b is the block size)\n");
+    printf("  -t <tracefile>: Name of trace file\n");
+}
+
+CacheSimulator parseArguments(int argc, char* argv[]) {
+    CacheSimulator sim;
+    int option;
+
+    while ((option = getopt(argc, argv, "s:E:b:t:")) != -1) {
+        switch (option) {
+            case 's':
+                sim.s = atoi(optarg);
+                break;
+            case 'E':
+                sim.E = atoi(optarg);
+                break;
+            case 'b':
+                sim.b = atoi(optarg);
+                break;
+            case 't':
+                sim.tracefile = optarg;
+                break;
+            default:
+                printUsage();
+                exit(1);
+        }
+    }
+    
+    return sim;
+}
+
+CacheLine* createCacheSet(int E) {
+    CacheLine* set = (CacheLine*) malloc(sizeof(CacheLine) * E);
+    for (int i = 0; i < E; i++) {
+        set[i].valid = 0;
+        set[i].tag = 0;
+        set[i].lastUsed = 0;
+    }
+    return set;
+}
+
+void freeCacheSet(CacheLine* set) {
+    free(set);
+}
+
+Cache* createCache(int S, int E) {
+    Cache* cache = (Cache*) malloc(sizeof(Cache));
+    cache->hits = 0;
+    cache->misses = 0;
+    cache->evictions = 0;
+    cache->sets = (CacheLine**) malloc(sizeof(CacheLine*) * S);
+    for (int i = 0; i < S; i++) {
+        cache->sets[i] = createCacheSet(E);
+    }
+    return cache;
+}
+
+void freeCache(Cache* cache, int S) {
+    for (int i = 0; i < S; i++) {
+        freeCacheSet(cache->sets[i]);
+    }
+    free(cache->sets);
+    free(cache);
+}
+
+void updateCache(Cache* cache, int setIndex, int tag, int E, int timestamp) {
+    CacheLine* set = cache->sets[setIndex];
+    int oldest = set[0].lastUsed;
+    int oldestIndex = 0;
+    int foundEmpty = 0;
+    
+    for (int i = 0; i < E; i++) {
+        if (!set[i].valid) {
+            foundEmpty = 1;
+            oldestIndex = i;
+            break;
+        }
+        if (set[i].lastUsed < oldest) {
+            oldest = set[i].lastUsed;
+            oldestIndex = i;
+        }
+    }
+    
+    if (foundEmpty) {
+        set[oldestIndex].valid = 1;
+        set[oldestIndex].tag = tag;
+        set[oldestIndex].lastUsed = timestamp;
+        cache->misses++;
+    } else {
+        if (set[oldestIndex].valid) {
+            cache->evictions++;
+        }
+        set[oldestIndex].tag = tag;
+        set[oldestIndex].lastUsed = timestamp;
+        cache->misses++;
+    }
+}
+
+void simulateCache(Cache* cache, CacheSimulator sim) {
+    FILE* tracefile = fopen(sim.tracefile, "r");
+    if (!tracefile) {
+        printf("Error: Cannot open trace file %s\n", sim.tracefile);
+        exit(1);
+    }
+    
+    int S = 1 << sim.s;
+    int E = sim.E;
+    int B = 1 << sim.b;
+    
+    int timestamp = 0;
+    char operation;
+    unsigned address;
+    int size;
+    
+    while (fscanf(tracefile, " %c %x, %d", &operation, &address, &size) > 0) {
+        if (operation == 'I') {
+            continue;
+        }
+        
+        int setIndex = (address >> sim.b) & (S - 1);
+        int tag = address >> (sim.s + sim.b);
+        timestamp++;
+        
+        CacheLine* set = cache->sets[setIndex];
+        int hit = 0;
+        
+        for (int i = 0; i < E; i++) {
+            if (set[i].valid && set[i].tag == tag) {
+                hit = 1;
+                set[i].lastUsed = timestamp;
+                cache->hits++;
+                break;
+            }
+        }
+        
+        if (!hit) {
+            updateCache(cache, setIndex, tag, E, timestamp);
+        }
+    }
+    
+    fclose(tracefile);
+}
+
+int main(int argc, char* argv[]) {
+    CacheSimulator sim = parseArguments(argc, argv);
+    Cache* cache = createCache(1 << sim.s, sim.E);
+    
+    simulateCache(cache, sim);
+    
+    printf("hits:%d misses:%d evictions:%d\n", cache->hits, cache->misses, cache->evictions);
+    
+    freeCache(cache, 1 << sim.s);
+    return 0;
+}
